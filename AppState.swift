@@ -129,7 +129,12 @@ final class AppState: ObservableObject {
     @Published private(set) var visibleCameras: [Camera] = []
 
     // UI
-    @Published var selected: Entity? { didSet { if selected != nil, oldValue?.id != selected?.id { awardXP(.viewLocation) } } }
+    @Published var selected: Entity? { didSet {
+        if selected != nil, oldValue?.id != selected?.id {
+            awardXP(.viewLocation)
+            if let e = selected, e.kind == .fire { recordFireSpotted(e.id) }
+        }
+    } }
     @Published var showTimeline = false
     @Published var showRoster = false
     @Published var tab = 0
@@ -207,6 +212,16 @@ final class AppState: ObservableObject {
 
     // Operator progression (see Progression.swift)
     @Published var xp: Int = 0 { didSet { ud.set(xp, forKey: "xp") } }
+
+    // Saved network traces (see NetworkTrace.swift / NetTraceView.swift)
+    @Published var savedTraces: [SavedTrace] = [] {
+        didSet { if let d = try? JSONEncoder().encode(savedTraces) { ud.set(d, forKey: "savedTraces") } }
+    }
+    func saveTrace(target: String, hops: [NetHop]) {
+        savedTraces.insert(SavedTrace(target: target, hops: hops), at: 0)
+        if savedTraces.count > 30 { savedTraces.removeLast(savedTraces.count - 30) }
+    }
+    func deleteSavedTraces(at offsets: IndexSet) { savedTraces.remove(atOffsets: offsets) }
 
     // Settings
     @Published var mapStyleRaw: String { didSet { ud.set(mapStyleRaw, forKey: "mapStyle") } }
@@ -297,6 +312,7 @@ final class AppState: ObservableObject {
         detection = ud.bool(forKey: "detection")
         if let d = ud.data(forKey: "bookmarks"), let b = try? JSONDecoder().decode([Bookmark].self, from: d) { bookmarks = b }
         xp = ud.object(forKey: "xp") as? Int ?? 0
+        if let d = ud.data(forKey: "savedTraces"), let t = try? JSONDecoder().decode([SavedTrace].self, from: d) { savedTraces = t }
         Feeds.shared.offline = offlineMode
         voice.onCommand = { [weak self] text in self?.handleVoice(text) }
         ais.onShip = { [weak self] ship in self?.ingest(ship) }
@@ -1626,7 +1642,7 @@ final class AppState: ObservableObject {
 
     func toggleBookmark(_ e: Entity) {
         if let i = bookmarks.firstIndex(where: { $0.id == e.id }) { bookmarks.remove(at: i) }
-        else { bookmarks.insert(Bookmark(e), at: 0); awardXP(.saveBookmark) }
+        else { bookmarks.insert(Bookmark(e), at: 0); awardXP(.saveBookmark); recordBookmarkTZ(lon: e.coord.longitude) }
     }
 
     func removeBookmarks(at offsets: IndexSet) { bookmarks.remove(atOffsets: offsets) }

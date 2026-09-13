@@ -12,7 +12,10 @@ final class TrafficSimulator {
 
     /// Populate cars + pedestrians across the loaded scene's ground footprint.
     /// `bounds` is the XZ bounding box (scene-local meters) of the terrain/building content already loaded.
-    func populate(in scene: SCNScene, ground: GroundGrid?, bounds: Bounds, carCount: Int = 14, pedCount: Int = 22) {
+    /// `roads`, when available (see RoadNetwork.swift — real OSM centerlines), makes cars follow
+    /// actual streets instead of wandering; `populationDensity` (0...1, a proxy driven by how many
+    /// building tiles are loaded — real data already in the scene) scales pedestrian count.
+    func populate(in scene: SCNScene, ground: GroundGrid?, bounds: Bounds, roads: RoadNetwork? = nil, populationDensity: Double = 0.5, carCount: Int = 14) {
         remove()
         guard bounds.maxX > bounds.minX, bounds.maxZ > bounds.minZ else { return }
         let r = SCNNode(); r.name = "traffic"
@@ -20,12 +23,19 @@ final class TrafficSimulator {
         root = r
 
         let carColors: [UIColor] = [.systemRed, .systemBlue, .systemYellow, .white, .darkGray, .systemGreen, .black]
+        let usableRoads = roads?.polylines.filter { $0.count > 1 } ?? []
         for i in 0..<carCount {
-            let car = Self.makeCar(color: carColors[i % carColors.count])
+            let isEmergency = i % 7 == 0
+            let car = Self.makeCar(color: isEmergency ? .white : carColors[i % carColors.count], emergency: isEmergency)
             r.addChildNode(car)
-            drivePatrol(car, ground: ground, bounds: bounds, speed: Float.random(in: 5.5...11))
+            if let line = usableRoads.randomElement() {
+                drivePatrol(car, ground: ground, path: line, speed: Float.random(in: isEmergency ? 14...20 : 5.5...11))
+            } else {
+                drivePatrol(car, ground: ground, bounds: bounds, speed: Float.random(in: isEmergency ? 14...20 : 5.5...11))
+            }
         }
-        for _ in 0..<pedCount {
+        let scaledPeds = Int(10 + populationDensity.clamped(0, 1) * 40)
+        for _ in 0..<scaledPeds {
             let ped = Self.makePedestrian()
             r.addChildNode(ped)
             walkPatrol(ped, ground: ground, bounds: bounds, speed: Float.random(in: 1.0...1.8))
@@ -41,7 +51,7 @@ final class TrafficSimulator {
 
     // MARK: Geometry (procedural low-poly, no bundled assets)
 
-    private static func makeCar(color: UIColor) -> SCNNode {
+    private static func makeCar(color: UIColor, emergency: Bool = false) -> SCNNode {
         let node = SCNNode(); node.name = "car"
         let body = SCNBox(width: 1.8, height: 0.6, length: 4.0, chamferRadius: 0.15)
         body.firstMaterial?.diffuse.contents = color
@@ -71,6 +81,28 @@ final class TrafficSimulator {
         taillight.geometry?.firstMaterial?.emission.contents = UIColor.red
         taillight.position = SCNVector3(0, 0.55, -2.0)
         node.addChildNode(taillight)
+
+        if emergency {
+            let bar = SCNBox(width: 0.9, height: 0.15, length: 0.35, chamferRadius: 0.03)
+            bar.firstMaterial?.diffuse.contents = UIColor(white: 0.1, alpha: 1)
+            let barNode = SCNNode(geometry: bar); barNode.position = SCNVector3(0, 1.18, -0.1)
+            node.addChildNode(barNode)
+            let red = SCNNode(geometry: SCNSphere(radius: 0.09)); red.position = SCNVector3(-0.25, 1.2, -0.1)
+            red.geometry?.firstMaterial?.emission.contents = UIColor.red
+            let blue = SCNNode(geometry: SCNSphere(radius: 0.09)); blue.position = SCNVector3(0.25, 1.2, -0.1)
+            blue.geometry?.firstMaterial?.emission.contents = UIColor.blue
+            node.addChildNode(red); node.addChildNode(blue)
+            let flashRed = SCNAction.repeatForever(SCNAction.sequence([
+                SCNAction.run { $0.geometry?.firstMaterial?.emission.intensity = 2 }, SCNAction.wait(duration: 0.15),
+                SCNAction.run { $0.geometry?.firstMaterial?.emission.intensity = 0.1 }, SCNAction.wait(duration: 0.15)
+            ]))
+            let flashBlue = SCNAction.repeatForever(SCNAction.sequence([
+                SCNAction.run { $0.geometry?.firstMaterial?.emission.intensity = 0.1 }, SCNAction.wait(duration: 0.15),
+                SCNAction.run { $0.geometry?.firstMaterial?.emission.intensity = 2 }, SCNAction.wait(duration: 0.15)
+            ]))
+            red.runAction(flashRed); blue.runAction(flashBlue)
+            node.name = "car_emergency"
+        }
         return node
     }
 
@@ -92,10 +124,20 @@ final class TrafficSimulator {
         return node
     }
 
-    // MARK: Movement — patrol a random polyline, looping back and forth forever
+    // MARK: Movement — patrol a random polyline (or a real road), looping back and forth forever
 
     private func drivePatrol(_ node: SCNNode, ground: GroundGrid?, bounds: Bounds, speed: Float) {
         let waypoints = Self.randomWaypoints(bounds: bounds, count: Int.random(in: 4...7), ground: ground)
+        guard let first = waypoints.first else { return }
+        node.position = first
+        runPatrol(node, waypoints: waypoints, speed: speed)
+    }
+
+    private func drivePatrol(_ node: SCNNode, ground: GroundGrid?, path: [SCNVector3], speed: Float) {
+        let waypoints = path.map { pt -> SCNVector3 in
+            let y = Float(ground?.height(x: Double(pt.x), y: Double(-pt.z)) ?? 0) + 0.02
+            return SCNVector3(pt.x, y, pt.z)
+        }
         guard let first = waypoints.first else { return }
         node.position = first
         runPatrol(node, waypoints: waypoints, speed: speed)
@@ -145,4 +187,8 @@ final class TrafficSimulator {
         }
         return pts
     }
+}
+
+private extension Double {
+    func clamped(_ lo: Double, _ hi: Double) -> Double { Swift.max(lo, Swift.min(hi, self)) }
 }

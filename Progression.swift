@@ -18,6 +18,8 @@ enum XPEvent: String, CaseIterable {
     case toggleLayer = "Activated a new layer"
     case exploreNewTile = "Explored new terrain tiles"
     case trafficWatch = "Watched live traffic"
+    case runTrace = "Ran a network trace"
+    case traceBattle = "Won a trace battle"
 
     var xp: Int {
         switch self {
@@ -28,6 +30,8 @@ enum XPEvent: String, CaseIterable {
         case .toggleLayer: return 6
         case .exploreNewTile: return 12
         case .trafficWatch: return 4
+        case .runTrace: return 10
+        case .traceBattle: return 20
         }
     }
 }
@@ -74,6 +78,20 @@ extension AppState {
         let after = LevelSystem.level(for: xp)
         if after > before {
             show("LEVEL UP · LV\(after) \(LevelSystem.title(for: after))")
+        }
+    }
+}
+
+// MARK: - Sensor modes gated behind operator level
+
+extension SensorMode {
+    var requiredLevel: Int {
+        switch self {
+        case .normal, .crt: return 1
+        case .noir: return 3
+        case .snow: return 4
+        case .nvg: return 6
+        case .flir: return 9
         }
     }
 }
@@ -128,6 +146,7 @@ struct LevelDetailSheet: View {
                         Text("\(s.levelInfo.xpIntoLevel) / \(s.levelInfo.xpForNextLevel) XP to next level")
                             .font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                         Text("\(s.xp) total XP").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        Text("\(s.discoveredTilesCount) tiles discovered · \(s.streakCount)-day streak").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 4)
                 }
@@ -138,6 +157,22 @@ struct LevelDetailSheet: View {
                             Spacer()
                             Text("+\(e.xp)").foregroundStyle(.orange).font(.system(size: 12, weight: .bold, design: .monospaced))
                         }
+                    }
+                }
+                Section("Quests") {
+                    ForEach(s.quests) { q in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(q.title).font(.system(size: 12, weight: .bold, design: .monospaced))
+                                Spacer()
+                                if q.done { Image(systemName: "checkmark.seal.fill").foregroundStyle(.green) }
+                                Text("+\(q.xp) XP").font(.system(size: 10, design: .monospaced)).foregroundStyle(.orange)
+                            }
+                            Text(q.detail).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                            XPBar(progress: Double(q.progress) / Double(q.target)).frame(height: 5)
+                            Text("\(q.progress)/\(q.target)").font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 2)
                     }
                 }
             }

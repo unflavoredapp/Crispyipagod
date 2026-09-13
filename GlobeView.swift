@@ -117,6 +117,7 @@ struct GlobeView: View {
                 .presentationBackground(.ultraThinMaterial)
         }
         .onOpenURL { url in s.open(url: url) }
+        .onAppear { s.checkDailyStreak() }
         .fullScreenCover(item: $s.liveCamera) { cam in
             CameraLiveView(rec: s.cctv, camera: cam).environmentObject(s)
         }
@@ -865,8 +866,13 @@ struct BottomPanel: View {
                 HoldAction(icon: "camera.aperture", title: "Modes", active: s.sensor != .normal || s.hud || s.detection, primary: { showModes = true }) {
                     Button { showModes = true } label: { Label("Modes sheet", systemImage: "camera.aperture") }
                     Button { s.showRealism = true } label: { Label("Realism 3D", systemImage: "cube.fill") }
-                    Picker("Sensor", selection: $s.sensor) {
-                        ForEach(SensorMode.allCases) { m in Text(m.title).tag(m) }
+                    Picker("Sensor", selection: Binding(get: { s.sensor }, set: { m in
+                        if m.requiredLevel <= s.levelInfo.level { s.sensor = m }
+                        else { s.show("LOCKED · \(m.title) unlocks at LV\(m.requiredLevel)") }
+                    })) {
+                        ForEach(SensorMode.allCases) { m in
+                            Text(m.requiredLevel <= s.levelInfo.level ? m.title : "\(m.title) 🔒 LV\(m.requiredLevel)").tag(m)
+                        }
                     }
                     Toggle(isOn: $s.hud) { Label("Military HUD", systemImage: "scope") }
                     Toggle(isOn: $s.detection) { Label("Detection boxes", systemImage: "viewfinder") }
