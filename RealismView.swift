@@ -16,13 +16,15 @@ struct RealismSceneView: View {
     @State private var trafficOn = false
     @State private var trafficBounds: TrafficSimulator.Bounds?
     @State private var ground: GroundGrid?
+    @State private var sceneOrigin: (lat: Double, lon: Double) = (0, 0)
+    private let streamer = TerrainStreamer()
     private let traffic = TrafficSimulator()
     private let presets: [(String, String, String)] = [("day", "Day", "sun.max.fill"), ("golden", "Golden", "sunset.fill"), ("night", "Night", "moon.stars.fill"), ("overcast", "Overcast", "cloud.fill")]
 
     var body: some View {
         ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
-            if let scene { RealismSCNView(scene: scene).ignoresSafeArea() }
+            if let scene { RealismSCNView(scene: scene, onFocusMoved: { focal in streamer.ensureLoaded(focal: focal, origin: sceneOrigin) }).ignoresSafeArea() }
             else {
                 VStack(spacing: 10) { ProgressView().tint(.yellow); Text(status).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding() }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -96,21 +98,45 @@ struct RealismSceneView: View {
                 origin = (meta.center[0], meta.center[1])
                 ground = await GroundGrid.load(base.appendingPathComponent("ground.json"))
                 let n = await ObjLoader.loadMeshTiles(base: base, meta: meta, around: c, style: .ortho)
-                if !n.childNodes.isEmpty { root.addChildNode(n); loaded.append("MESH") }
+                if !n.childNodes.isEmpty {
+                    let names = n.childNodes.compactMap(\.name)
+                    for child in Array(n.childNodes) { root.addChildNode(child) }
+                    loaded.append("MESH")
+                    let kx0 = 111320.0 * cos(meta.center[0] * .pi / 180), ky0 = 110540.0
+                    let x0 = (c.longitude - meta.center[1]) * kx0, y0 = (c.latitude - meta.center[0]) * ky0
+                    let i0 = Int(floor((x0 + meta.half) / meta.tileM)), j0 = Int(floor((meta.half - y0) / meta.tileM))
+                    streamer.register(kind: "mesh", prefix: "m", base: base, meta: meta, style: .ortho, initiallyLoaded: names, initialIndex: (i0, j0))
+                }
             }
         }
         if let b = covering("buildings"), b.id.hasPrefix(area) {
             status = "Loading buildings…"
             if let (meta, base) = await TileMeta.load(b.url) {
                 let n = await ObjLoader.loadGridTiles(base: base, prefix: "b", meta: meta, around: c, style: .pbr, ground: ground)
-                if !n.childNodes.isEmpty { root.addChildNode(n); loaded.append("BUILDINGS") }
+                if !n.childNodes.isEmpty {
+                    let names = n.childNodes.compactMap(\.name)
+                    for child in Array(n.childNodes) { root.addChildNode(child) }
+                    loaded.append("BUILDINGS")
+                    let kx0 = 111320.0 * cos(meta.center[0] * .pi / 180), ky0 = 110540.0
+                    let x0 = (c.longitude - meta.center[1]) * kx0, y0 = (c.latitude - meta.center[0]) * ky0
+                    let i0 = Int(floor(x0 / meta.tileM)), j0 = Int(floor(y0 / meta.tileM))
+                    streamer.register(kind: "buildings", prefix: "b", base: base, meta: meta, style: .pbr, initiallyLoaded: names, initialIndex: (i0, j0))
+                }
             }
         }
         if let t = covering("trees"), t.id.hasPrefix(area) {
             status = "Loading vegetation…"
             if let (meta, base) = await TileMeta.load(t.url) {
                 let n = await ObjLoader.loadGridTiles(base: base, prefix: "t", meta: meta, around: c, style: .trees, ground: ground)
-                if !n.childNodes.isEmpty { root.addChildNode(n); loaded.append("TREES") }
+                if !n.childNodes.isEmpty {
+                    let names = n.childNodes.compactMap(\.name)
+                    for child in Array(n.childNodes) { root.addChildNode(child) }
+                    loaded.append("TREES")
+                    let kx0 = 111320.0 * cos(meta.center[0] * .pi / 180), ky0 = 110540.0
+                    let x0 = (c.longitude - meta.center[1]) * kx0, y0 = (c.latitude - meta.center[0]) * ky0
+                    let i0 = Int(floor(x0 / meta.tileM)), j0 = Int(floor(y0 / meta.tileM))
+                    streamer.register(kind: "trees", prefix: "t", base: base, meta: meta, style: .trees, initiallyLoaded: names, initialIndex: (i0, j0))
+                }
             }
         }
         if ground == nil {
@@ -125,6 +151,8 @@ struct RealismSceneView: View {
         let fy = ground?.height(x: Double(fx), y: Double(-fz)) ?? 0
         RealismStage.setup(sc, focus: SCNVector3(fx, Float(fy), fz), distance: Float(max(120, min(s.distance, 1200))))
         RealismStage.apply(preset, to: sc, lat: c.latitude, lon: c.longitude)
+        streamer.configure(root: root, ground: ground)
+        self.sceneOrigin = origin
         scene = sc
         self.ground = ground
         let (minB, maxB) = root.boundingBox
@@ -144,7 +172,7 @@ struct TileMeta {
     let center: [Double]; let tileM: Double; let half: Double
     static func load(_ tilesetURL: String) async -> (TileMeta, URL)? {
         guard let base = URL(string: tilesetURL)?.deletingLastPathComponent(),
-              let d = try? await URLSession.shared.data(from: base.appendingPathComponent("meta.json")).0,
+              let d = await RealismTileCache.data(for: base.appendingPathComponent("meta.json")),
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let center = j["center"] as? [Double], center.count == 2,
               let tileM = j["tileM"] as? Double, let half = j["half"] as? Double else { return nil }
@@ -159,7 +187,7 @@ final class GroundGrid {
         self.cell = cell; self.half = half; self.rows = rows; self.cols = cols; self.z = z
     }
     static func load(_ url: URL) async -> GroundGrid? {
-        guard let d = try? await URLSession.shared.data(from: url).0, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        guard let d = await RealismTileCache.data(for: url), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
         return GroundGrid(json: j)
     }
     /// x east, y north (metres from area centre) → ground height (metres, mesh-local).
@@ -216,11 +244,11 @@ enum ObjLoader {
         let m = SCNMaterial(); m.lightingModel = .physicallyBased; m.isDoubleSided = false
         switch style {
         case .ortho:
-            if let d = try? await URLSession.shared.data(from: base.appendingPathComponent("\(tile).jpg")).0, let img = UIImage(data: d) { m.diffuse.contents = img }
+            if let d = await RealismTileCache.data(for: base.appendingPathComponent("\(tile).jpg")), let img = UIImage(data: d) { m.diffuse.contents = img }
             m.roughness.contents = 0.95; m.metalness.contents = 0.0
         case .pbr:
-            if let d = try? await URLSession.shared.data(from: base.appendingPathComponent("tex_\(name).png")).0, let img = UIImage(data: d) { m.diffuse.contents = img; m.diffuse.wrapS = .repeat; m.diffuse.wrapT = .repeat }
-            if let d = try? await URLSession.shared.data(from: base.appendingPathComponent("tex_\(name)_em.png")).0, let img = UIImage(data: d) { m.emission.contents = img; m.emission.wrapS = .repeat; m.emission.wrapT = .repeat; m.emission.intensity = 0 }
+            if let d = await RealismTileCache.data(for: base.appendingPathComponent("tex_\(name).png")), let img = UIImage(data: d) { m.diffuse.contents = img; m.diffuse.wrapS = .repeat; m.diffuse.wrapT = .repeat }
+            if let d = await RealismTileCache.data(for: base.appendingPathComponent("tex_\(name)_em.png")), let img = UIImage(data: d) { m.emission.contents = img; m.emission.wrapS = .repeat; m.emission.wrapT = .repeat; m.emission.intensity = 0 }
             switch name {
             case "glass": m.metalness.contents = 0.85; m.roughness.contents = 0.12
             case "metal": m.metalness.contents = 0.6; m.roughness.contents = 0.5
@@ -275,10 +303,10 @@ enum ObjLoader {
     }
     private static func neighbours(_ i: Int, _ j: Int) -> [(Int, Int)] { [(i, j), (i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1), (i - 1, j - 1), (i + 1, j - 1), (i - 1, j + 1), (i + 1, j + 1)] }
 
-    private static func loadTiles(base: URL, names: [String], style: ObjStyle, ground: GroundGrid?) async -> SCNNode {
+    static func loadTiles(base: URL, names: [String], style: ObjStyle, ground: GroundGrid?) async -> SCNNode {
         let parent = SCNNode(); var cache: [String: SCNMaterial] = [:]
         for name in names {
-            guard let d = try? await URLSession.shared.data(from: base.appendingPathComponent("\(name).obj")).0, let text = String(data: d, encoding: .utf8) else { continue }
+            guard let d = await RealismTileCache.data(for: base.appendingPathComponent("\(name).obj")), let text = String(data: d, encoding: .utf8) else { continue }
             let groups = parse(text)
             if groups.isEmpty { continue }
             let n = await node(from: groups, style: style, base: base, tile: name, ground: ground, cache: &cache)
@@ -343,6 +371,10 @@ enum RealismStage {
 
 struct RealismSCNView: UIViewRepresentable {
     let scene: SCNScene
+    var onFocusMoved: ((SCNVector3) -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator(onFocusMoved: onFocusMoved) }
+
     func makeUIView(context: Context) -> SCNView {
         let v = SCNView()
         v.scene = scene
@@ -355,7 +387,35 @@ struct RealismSCNView: UIViewRepresentable {
         v.antialiasingMode = .multisampling4X
         v.preferredFramesPerSecond = 60
         v.backgroundColor = .black
+        v.delegate = context.coordinator
+        context.coordinator.view = v
         return v
     }
-    func updateUIView(_ v: SCNView, context: Context) {}
+    func updateUIView(_ v: SCNView, context: Context) { context.coordinator.onFocusMoved = onFocusMoved }
+
+    /// Polls the camera controller's pan/orbit target a few times a second while the view is
+    /// open — this is how we know the user has panned somewhere new and it's time to stream
+    /// in the next ring of tiles (moving the target is SceneKit's own two-finger-pan gesture,
+    /// already enabled by `allowsCameraControl` above; no extra gesture code needed).
+    final class Coordinator: NSObject, SCNSceneRendererDelegate {
+        var onFocusMoved: ((SCNVector3) -> Void)?
+        weak var view: SCNView?
+        private var lastCheck: TimeInterval = 0
+        private var lastTarget: SCNVector3?
+
+        init(onFocusMoved: ((SCNVector3) -> Void)?) { self.onFocusMoved = onFocusMoved }
+
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+            guard time - lastCheck > 0.35, let v = view else { return }
+            lastCheck = time
+            let t = v.defaultCameraController.target
+            if let last = lastTarget {
+                let d = sqrt(pow(t.x - last.x, 2) + pow(t.z - last.z, 2))
+                if d < 2 { return }
+            }
+            lastTarget = t
+            let cb = onFocusMoved
+            DispatchQueue.main.async { cb?(t) }
+        }
+    }
 }

@@ -218,8 +218,8 @@ final class AppState: ObservableObject {
     @Published var firmsKey: String { didSet { ud.set(firmsKey, forKey: "firmsKey"); if layers.contains(.fires) { Task { await refreshFires() } } } }
 
     // 3D scene (CesiumJS: Esri / OSM / Google Photorealistic 3D / ion assets)
-    @Published var show3D = false
     @Published var showRealism = false
+    @Published var showNetTrace = false
     @Published var ionToken: String { didSet { ud.set(ionToken, forKey: "ionToken") } }
     @Published var ionAssets: String { didSet { ud.set(ionAssets, forKey: "ionAssets") } }
     @Published var googleMapsKey: String { didSet { ud.set(googleMapsKey, forKey: "googleMapsKey") } }

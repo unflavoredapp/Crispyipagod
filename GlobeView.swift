@@ -120,11 +120,11 @@ struct GlobeView: View {
         .fullScreenCover(item: $s.liveCamera) { cam in
             CameraLiveView(rec: s.cctv, camera: cam).environmentObject(s)
         }
-        .fullScreenCover(isPresented: $s.show3D) {
-            Scene3DView().environmentObject(s)
-        }
         .fullScreenCover(isPresented: $s.showRealism) {
             RealismSceneView().environmentObject(s)
+        }
+        .fullScreenCover(isPresented: $s.showNetTrace) {
+            NetTraceView().environmentObject(s)
         }
     }
 
@@ -658,6 +658,7 @@ struct GlobeView: View {
                         label: s.isLive ? "Time" : "Replay",
                         active: !s.isLive) { s.openTimeline(at: nil) }
             GlassButton(icon: "cube.transparent", label: "3D") { s.showRealism = true }
+            GlassButton(icon: "point.3.connected.trianglepath.dotted", label: "Trace") { s.showNetTrace = true }
             VoiceButton(voice: s.voice)
         }
         .padding(.horizontal, 12)
@@ -864,7 +865,6 @@ struct BottomPanel: View {
                 HoldAction(icon: "camera.aperture", title: "Modes", active: s.sensor != .normal || s.hud || s.detection, primary: { showModes = true }) {
                     Button { showModes = true } label: { Label("Modes sheet", systemImage: "camera.aperture") }
                     Button { s.showRealism = true } label: { Label("Realism 3D", systemImage: "cube.fill") }
-                    Button { s.show3D = true } label: { Label("Intel scene", systemImage: "cube.transparent") }
                     Picker("Sensor", selection: $s.sensor) {
                         ForEach(SensorMode.allCases) { m in Text(m.title).tag(m) }
                     }
@@ -883,8 +883,7 @@ struct BottomPanel: View {
                 }
                 HoldAction(icon: "square.3.layers.3d", title: "Layers", active: s.layers.contains(.radar) || s.layers.contains(.space), primary: { showLayers = true }) {
                     Button { showLayers = true } label: { Label("Layers sheet", systemImage: "square.3.layers.3d") }
-                    Button { s.showRealism = true } label: { Label("Realism 3D (native)", systemImage: "cube.fill") }
-                    Button { s.show3D = true } label: { Label("Intel scene · Esri / Google / OSM", systemImage: "cube.transparent") }
+                    Button { s.showRealism = true } label: { Label("Realism 3D", systemImage: "cube.fill") }
                     if !s.propertyLines.isEmpty {
                         Button(role: .destructive) { s.propertyLines = [] } label: { Label("Clear property lines", systemImage: "rectangle.dashed") }
                     }
