@@ -7,8 +7,9 @@ from common import bbox_from, stac_search, sign, write_meta, enu_to_ecef_matrix
 ap = argparse.ArgumentParser()
 ap.add_argument("--name", required=True); ap.add_argument("--lat", type=float, required=True)
 ap.add_argument("--lon", type=float, required=True); ap.add_argument("--radius-km", type=float, default=1.0)
-ap.add_argument("--cell", type=float, default=1.0, help="DSM cell size in metres")
+ap.add_argument("--cell", type=float, default=0.5, help="DSM cell size in metres (smaller = sharper geometry, less blobby/melted detail)")
 ap.add_argument("--tile-m", type=float, default=256)
+ap.add_argument("--tex-scale", type=float, default=2.0, help="orthophoto texture supersample factor relative to the DSM grid — texture stays crisp even though geometry is coarser")
 ap.add_argument("--max-points", type=float, default=25)
 ap.add_argument("--geoid-m", type=float, default=-32.0, help="NAVD88 -> ellipsoid offset (CONUS interior ≈ -30..-36 m)")
 a = ap.parse_args()
@@ -63,12 +64,14 @@ for it in items:
             if total >= cap: break
     except Exception as ex: print("skip", it["id"], repr(ex))
 if total == 0: print("no points"); sys.exit(0)
-# fill holes (nearest) and light smoothing on ground only
+# fill holes (nearest) — only the interpolated hole pixels get smoothed; real lidar samples stay
+# sharp, which is what was causing rooftop equipment / tree canopies to "melt" into soft blobs
 mask = np.isinf(dsm)
 if mask.all(): print("empty dsm"); sys.exit(0)
 idx = ndimage.distance_transform_edt(mask, return_distances=False, return_indices=True)
-dsm = dsm[tuple(idx)]
-dsm = ndimage.median_filter(dsm, size=3)
+filled = dsm[tuple(idx)]
+smoothed = ndimage.median_filter(filled, size=3)
+dsm = np.where(mask, smoothed, filled)
 zmin = float(np.percentile(dsm, 0.5)); dsm = dsm - zmin      # local up = 0 at lowest ground
 base = zmin + a.geoid_m
 print("dsm range", float(dsm.min()), float(dsm.max()))
@@ -81,12 +84,14 @@ if naip:
     def yr(i): return str(i["properties"].get("naip:year") or i["properties"]["datetime"][:4])
     year = yr(naip[0]); hrefs = [sign(i["assets"]["image"]["href"]) for i in naip if yr(i) == year]
     env = dict(os.environ, GDAL_HTTP_MULTIRANGE="YES", GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR")
-    # warp straight into an equirect grid that matches our ENU grid closely enough at this scale
-    subprocess.check_call(["gdalwarp", "-q", "-t_srs", "EPSG:4326", "-te", *map(str, bbox), "-ts", str(W), str(H), "-r", "bilinear", "-ot", "Byte",
+    # texture is warped at tex-scale× the DSM grid so the photo drape stays crisp even though the
+    # mesh geometry itself is coarser — decouples "how detailed it looks" from "how many triangles"
+    texW, texH = int(W * a.tex_scale), int(H * a.tex_scale)
+    subprocess.check_call(["gdalwarp", "-q", "-t_srs", "EPSG:4326", "-te", *map(str, bbox), "-ts", str(texW), str(texH), "-r", "bilinear", "-ot", "Byte",
                            "-co", "TILED=YES", *[f"/vsicurl/{h}" for h in hrefs], "work/tex.tif"], env=env)
-    subprocess.check_call(["gdal_translate", "-q", "-b", "1", "-b", "2", "-b", "3", "-of", "JPEG", "-co", "QUALITY=88", "work/tex.tif", "work/tex.jpg"], env=env)
+    subprocess.check_call(["gdal_translate", "-q", "-b", "1", "-b", "2", "-b", "3", "-of", "JPEG", "-co", "QUALITY=95", "work/tex.tif", "work/tex.jpg"], env=env)
     tex_ok = True
-tex = Image.open("work/tex.jpg").convert("RGB") if tex_ok else Image.new("RGB", (W, H), (110, 120, 90))
+tex = Image.open("work/tex.jpg").convert("RGB") if tex_ok else Image.new("RGB", (int(W * a.tex_scale), int(H * a.tex_scale)), (110, 120, 90))
 
 # ---------- 2b. coarse ground grid (DTM-ish via minimum filter) for placing buildings/trees in the native viewer ----------
 gcell = 10
@@ -117,8 +122,8 @@ for ty in range(0, H, step):
         # glTF is Y-up: (x, z, -y)
         Vg = np.column_stack([V[:, 0], V[:, 2], -V[:, 1]])
         m = trimesh.Trimesh(vertices=Vg, faces=F, process=False)
-        # UVs: tile crop of the ortho
-        crop = tex.crop((c0, r0, c1 + 1, r1 + 1))
+        # UVs: tile crop of the ortho (texture grid is tex-scale× the mesh grid, see above)
+        crop = tex.crop((int(c0 * a.tex_scale), int(r0 * a.tex_scale), int((c1 + 1) * a.tex_scale), int((r1 + 1) * a.tex_scale)))
         u = (np.arange(ww) + 0.5) / ww; v = (np.arange(hh) + 0.5) / hh   # glTF UV origin is top-left
         UU, VV = np.meshgrid(u, v)
         m.visual = trimesh.visual.TextureVisuals(uv=np.column_stack([UU.ravel(), VV.ravel()]), image=crop)
@@ -126,7 +131,7 @@ for ty in range(0, H, step):
         m.export(os.path.join(out, fn))
         # OBJ + MTL + JPG twin for the native (SceneKit) structure viewer
         stem = fn[:-4]
-        crop.convert("RGB").save(os.path.join(out, stem + ".jpg"), quality=85)
+        crop.convert("RGB").save(os.path.join(out, stem + ".jpg"), quality=95)
         with open(os.path.join(out, stem + ".mtl"), "w") as f: f.write(f"newmtl ortho\nKa 1 1 1\nKd 1 1 1\nKs 0 0 0\nmap_Kd {stem}.jpg\n")
         uvs = np.column_stack([UU.ravel(), 1.0 - VV.ravel()])
         with open(os.path.join(out, stem + ".obj"), "w") as f:

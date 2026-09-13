@@ -26,7 +26,7 @@ def enu(lon, lat): return ((lon - lon0) * kx, (lat - lat0) * ky)
 rng = np.random.default_rng(3)
 
 # ---------------- procedural facade textures ----------------
-TEX = 256
+TEX = 512  # procedural facade texture resolution — 512 keeps window/trim detail crisp up close
 def facade_tex(style):
     img = Image.new("RGB", (TEX, TEX)); d = ImageDraw.Draw(img)
     em = Image.new("RGB", (TEX, TEX), (0, 0, 0)); de = ImageDraw.Draw(em)

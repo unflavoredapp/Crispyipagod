@@ -11,19 +11,35 @@ struct RealismSceneView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var scene: SCNScene?
     @State private var status = "Loading realism tiles…"
-    @State private var preset = "golden"
+    @State private var preset = "auto"
     @State private var loaded: [String] = []
-    private let presets: [(String, String, String)] = [("day", "Day", "sun.max.fill"), ("golden", "Golden", "sunset.fill"), ("night", "Night", "moon.stars.fill"), ("overcast", "Overcast", "cloud.fill")]
+    @State private var trafficOn = false
+    @State private var trafficBounds: TrafficSimulator.Bounds?
+    @State private var ground: GroundGrid?
+    @State private var weatherNow: WeatherNow?
+    @State private var sceneOrigin: (lat: Double, lon: Double) = (0, 0)
+    @State private var scnView: SCNView?
+    @State private var photoMode = false
+    @State private var capturedImage: UIImage?
+    @State private var showShare = false
+    @State private var ufoActive = false
+    private let streamer = TerrainStreamer()
+    private let traffic = TrafficSimulator()
+    private let presets: [(String, String, String)] = [("auto", "Auto", "sun.and.horizon.fill"), ("day", "Day", "sun.max.fill"), ("golden", "Golden", "sunset.fill"), ("night", "Night", "moon.stars.fill"), ("overcast", "Overcast", "cloud.fill")]
 
     var body: some View {
         ZStack(alignment: .top) {
             Color.black.ignoresSafeArea()
-            if let scene { RealismSCNView(scene: scene).ignoresSafeArea() }
+            if let scene { RealismSCNView(scene: scene, onFocusMoved: { focal in
+                streamer.ensureLoaded(focal: focal, origin: sceneOrigin)
+                scene.rootNode.childNode(withName: "weatherFX", recursively: false)?.position = SCNVector3(focal.x, focal.y + 40, focal.z)
+            }, onViewReady: { scnView = $0 }).ignoresSafeArea() }
             else {
                 VStack(spacing: 10) { ProgressView().tint(.yellow); Text(status).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).multilineTextAlignment(.center).padding() }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             VStack(spacing: 6) {
+                if !photoMode {
                 HStack(spacing: 8) {
                     Button { dismiss() } label: { Image(systemName: "xmark").font(.system(size: 14, weight: .bold)).frame(width: 36, height: 36).background(Circle().fill(.ultraThinMaterial)) }
                     ScrollView(.horizontal, showsIndicators: false) {
@@ -37,6 +53,30 @@ struct RealismSceneView: View {
                                 }
                                 .buttonStyle(.plain)
                             }
+                            Button { toggleTraffic() } label: {
+                                HStack(spacing: 5) { Image(systemName: "car.2.fill"); Text("Traffic").font(.system(size: 11, weight: .semibold, design: .monospaced)) }
+                                    .padding(.horizontal, 10).padding(.vertical, 8)
+                                    .foregroundStyle(trafficOn ? Color.black : Color.primary)
+                                    .background(Capsule().fill(trafficOn ? AnyShapeStyle(Color.green) : AnyShapeStyle(.ultraThinMaterial)))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(scene == nil || trafficBounds == nil)
+                            Button { spawnUFO() } label: {
+                                HStack(spacing: 5) { Image(systemName: "sparkles"); Text("UFO").font(.system(size: 11, weight: .semibold, design: .monospaced)) }
+                                    .padding(.horizontal, 10).padding(.vertical, 8)
+                                    .foregroundStyle(ufoActive ? Color.black : Color.primary)
+                                    .background(Capsule().fill(ufoActive ? AnyShapeStyle(Color.purple) : AnyShapeStyle(.ultraThinMaterial)))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(scene == nil || ufoActive)
+                            Button { photoMode = true } label: {
+                                Image(systemName: "camera.fill").font(.system(size: 13, weight: .semibold))
+                                    .frame(width: 36, height: 36)
+                                    .foregroundStyle(.primary)
+                                    .background(Circle().fill(.ultraThinMaterial))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(scene == nil)
                         }
                     }
                 }
@@ -46,11 +86,80 @@ struct RealismSceneView: View {
                     Spacer()
                 }
                 .padding(.horizontal, 14)
+                }
             }
             .foregroundStyle(.white)
+
+            if photoMode {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 28) {
+                        Button { photoMode = false } label: {
+                            Image(systemName: "xmark").font(.system(size: 16, weight: .bold)).frame(width: 44, height: 44).background(Circle().fill(.ultraThinMaterial))
+                        }
+                        Button { capturePhoto() } label: {
+                            Circle().fill(.white).frame(width: 62, height: 62)
+                                .overlay(Circle().stroke(.black.opacity(0.3), lineWidth: 3).padding(3))
+                        }
+                        Color.clear.frame(width: 44, height: 44)
+                    }
+                    .padding(.bottom, 28)
+                }
+                .foregroundStyle(.white)
+            }
+        }
+        .sheet(isPresented: $showShare) {
+            if let capturedImage { ActivityShareSheet(items: [capturedImage]) }
         }
         .preferredColorScheme(.dark)
         .task { await build() }
+        .onDisappear { traffic.remove() }
+        .onReceive(Timer.publish(every: 60, on: .main, in: .common).autoconnect()) { _ in
+            if preset == "auto", let scene { RealismStage.apply(preset, to: scene, lat: s.center.latitude, lon: s.center.longitude) }
+        }
+    }
+
+    private func toggleTraffic() {
+        guard let scene, let bounds = trafficBounds else { return }
+        trafficOn.toggle()
+        if trafficOn {
+            s.awardXP(.trafficWatch)
+            // building-tile count already loaded is a real, honest proxy for local density —
+            // there's no free keyless population-grid API, but this scales with actual built-up area
+            let buildingTileCount = scene.rootNode.childNodes.filter { ($0.name ?? "").hasPrefix("b_") }.count
+            let density = min(1.0, Double(buildingTileCount) / 9.0)
+            let origin = sceneOrigin
+            // instant feedback first (random waypoints), then upgrade in place once real roads load
+            traffic.populate(in: scene, ground: ground, bounds: bounds, roads: nil, populationDensity: density)
+            Task {
+                let kx = 111320.0 * cos(origin.lat * .pi / 180), ky = 110540.0
+                let latA = origin.lat - Double(bounds.minZ) / ky, latB = origin.lat - Double(bounds.maxZ) / ky
+                let lonA = origin.lon + Double(bounds.minX) / kx, lonB = origin.lon + Double(bounds.maxX) / kx
+                let roads = await OverpassRoads.fetch(minLat: min(latA, latB), minLon: min(lonA, lonB), maxLat: max(latA, latB), maxLon: max(lonA, lonB), origin: origin)
+                await MainActor.run {
+                    guard trafficOn, let scene, roads != nil else { return }
+                    traffic.populate(in: scene, ground: ground, bounds: bounds, roads: roads, populationDensity: density)
+                }
+            }
+        } else {
+            traffic.remove()
+        }
+    }
+
+    private func capturePhoto() {
+        guard let img = scnView?.snapshot() else { return }
+        capturedImage = img
+        showShare = true
+        s.recordPhotoTaken()
+    }
+
+    private func spawnUFO() {
+        guard let scene, let bounds = trafficBounds else { return }
+        ufoActive = true
+        UFOEncounter.spawn(in: scene, ground: ground, bounds: bounds) {
+            ufoActive = false
+            s.recordUFOSighting()
+        }
     }
 
     private func build() async {
@@ -61,6 +170,7 @@ struct RealismSceneView: View {
         }
         guard let mesh = covering("mesh") ?? covering("buildings") else { status = "No realism tiles cover this spot yet.\nRun Build tiles (all) for \(String(format: "%.4f, %.4f", c.latitude, c.longitude))."; return }
         let area = mesh.id.split(separator: "/").first.map(String.init) ?? ""
+        ObjLoader.foliageSeason = Season.current(latitude: c.latitude)
         let sc = SCNScene()
         let root = SCNNode(); root.name = "world"; sc.rootNode.addChildNode(root)
         var ground: GroundGrid? = nil
@@ -72,21 +182,48 @@ struct RealismSceneView: View {
                 origin = (meta.center[0], meta.center[1])
                 ground = await GroundGrid.load(base.appendingPathComponent("ground.json"))
                 let n = await ObjLoader.loadMeshTiles(base: base, meta: meta, around: c, style: .ortho)
-                if !n.childNodes.isEmpty { root.addChildNode(n); loaded.append("MESH") }
+                if !n.childNodes.isEmpty {
+                    let names = n.childNodes.compactMap(\.name)
+                    for child in Array(n.childNodes) { root.addChildNode(child) }
+                    loaded.append("MESH")
+                    let kx0 = 111320.0 * cos(meta.center[0] * .pi / 180), ky0 = 110540.0
+                    let x0 = (c.longitude - meta.center[1]) * kx0, y0 = (c.latitude - meta.center[0]) * ky0
+                    let i0 = Int(floor((x0 + meta.half) / meta.tileM)), j0 = Int(floor((meta.half - y0) / meta.tileM))
+                    streamer.register(kind: "mesh", prefix: "m", base: base, meta: meta, style: .ortho, initiallyLoaded: names, initialIndex: (i0, j0))
+                    s.recordDiscoveredTiles(names)
+                }
             }
         }
         if let b = covering("buildings"), b.id.hasPrefix(area) {
             status = "Loading buildings…"
             if let (meta, base) = await TileMeta.load(b.url) {
                 let n = await ObjLoader.loadGridTiles(base: base, prefix: "b", meta: meta, around: c, style: .pbr, ground: ground)
-                if !n.childNodes.isEmpty { root.addChildNode(n); loaded.append("BUILDINGS") }
+                if !n.childNodes.isEmpty {
+                    let names = n.childNodes.compactMap(\.name)
+                    for child in Array(n.childNodes) { root.addChildNode(child) }
+                    loaded.append("BUILDINGS")
+                    let kx0 = 111320.0 * cos(meta.center[0] * .pi / 180), ky0 = 110540.0
+                    let x0 = (c.longitude - meta.center[1]) * kx0, y0 = (c.latitude - meta.center[0]) * ky0
+                    let i0 = Int(floor(x0 / meta.tileM)), j0 = Int(floor(y0 / meta.tileM))
+                    streamer.register(kind: "buildings", prefix: "b", base: base, meta: meta, style: .pbr, initiallyLoaded: names, initialIndex: (i0, j0))
+                    s.recordDiscoveredTiles(names)
+                }
             }
         }
         if let t = covering("trees"), t.id.hasPrefix(area) {
             status = "Loading vegetation…"
             if let (meta, base) = await TileMeta.load(t.url) {
                 let n = await ObjLoader.loadGridTiles(base: base, prefix: "t", meta: meta, around: c, style: .trees, ground: ground)
-                if !n.childNodes.isEmpty { root.addChildNode(n); loaded.append("TREES") }
+                if !n.childNodes.isEmpty {
+                    let names = n.childNodes.compactMap(\.name)
+                    for child in Array(n.childNodes) { root.addChildNode(child) }
+                    loaded.append("TREES")
+                    let kx0 = 111320.0 * cos(meta.center[0] * .pi / 180), ky0 = 110540.0
+                    let x0 = (c.longitude - meta.center[1]) * kx0, y0 = (c.latitude - meta.center[0]) * ky0
+                    let i0 = Int(floor(x0 / meta.tileM)), j0 = Int(floor(y0 / meta.tileM))
+                    streamer.register(kind: "trees", prefix: "t", base: base, meta: meta, style: .trees, initiallyLoaded: names, initialIndex: (i0, j0))
+                    s.recordDiscoveredTiles(names)
+                }
             }
         }
         if ground == nil {
@@ -101,8 +238,23 @@ struct RealismSceneView: View {
         let fy = ground?.height(x: Double(fx), y: Double(-fz)) ?? 0
         RealismStage.setup(sc, focus: SCNVector3(fx, Float(fy), fz), distance: Float(max(120, min(s.distance, 1200))))
         RealismStage.apply(preset, to: sc, lat: c.latitude, lon: c.longitude)
+        if let w = await OpenMeteo.current(lat: c.latitude, lon: c.longitude) {
+            weatherNow = w
+            WeatherFX.apply(w, to: sc, focus: SCNVector3(fx, Float(fy), fz))
+        }
+        streamer.configure(root: root, ground: ground)
+        streamer.onTilesLoaded = { [s] names in s.recordDiscoveredTiles(names) }
+        self.sceneOrigin = origin
         scene = sc
+        self.ground = ground
+        let (minB, maxB) = root.boundingBox
+        if maxB.x > minB.x, maxB.z > minB.z {
+            // shrink slightly off the outer edge so agents don't spawn floating past loaded tiles
+            let pad: Float = 15
+            trafficBounds = (minB.x + pad, maxB.x - pad, minB.z + pad, maxB.z - pad)
+        }
         if loaded.isEmpty { status = "Tiles listed but nothing loaded for this spot" }
+        else { s.awardXP(.openRealism) }
     }
 }
 
@@ -112,7 +264,7 @@ struct TileMeta {
     let center: [Double]; let tileM: Double; let half: Double
     static func load(_ tilesetURL: String) async -> (TileMeta, URL)? {
         guard let base = URL(string: tilesetURL)?.deletingLastPathComponent(),
-              let d = try? await URLSession.shared.data(from: base.appendingPathComponent("meta.json")).0,
+              let d = await RealismTileCache.data(for: base.appendingPathComponent("meta.json")),
               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
               let center = j["center"] as? [Double], center.count == 2,
               let tileM = j["tileM"] as? Double, let half = j["half"] as? Double else { return nil }
@@ -127,7 +279,7 @@ final class GroundGrid {
         self.cell = cell; self.half = half; self.rows = rows; self.cols = cols; self.z = z
     }
     static func load(_ url: URL) async -> GroundGrid? {
-        guard let d = try? await URLSession.shared.data(from: url).0, let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+        guard let d = await RealismTileCache.data(for: url), let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
         return GroundGrid(json: j)
     }
     /// x east, y north (metres from area centre) → ground height (metres, mesh-local).
@@ -143,6 +295,8 @@ final class GroundGrid {
 enum ObjStyle { case ortho, pbr, trees }
 
 enum ObjLoader {
+    /// Set once per build() from the real date + latitude — see Season (WorldSim.swift).
+    static var foliageSeason: Season = .summer
     struct Group { var name: String; var material: String; var v: [SCNVector3] = []; var uv: [CGPoint] = []; var idx: [Int32] = [] }
 
     static func parse(_ text: String) -> [Group] {
@@ -184,11 +338,13 @@ enum ObjLoader {
         let m = SCNMaterial(); m.lightingModel = .physicallyBased; m.isDoubleSided = false
         switch style {
         case .ortho:
-            if let d = try? await URLSession.shared.data(from: base.appendingPathComponent("\(tile).jpg")).0, let img = UIImage(data: d) { m.diffuse.contents = img }
+            if let d = await RealismTileCache.data(for: base.appendingPathComponent("\(tile).jpg")), let img = UIImage(data: d) { m.diffuse.contents = img }
             m.roughness.contents = 0.95; m.metalness.contents = 0.0
+            sharpen(m.diffuse)
         case .pbr:
-            if let d = try? await URLSession.shared.data(from: base.appendingPathComponent("tex_\(name).png")).0, let img = UIImage(data: d) { m.diffuse.contents = img; m.diffuse.wrapS = .repeat; m.diffuse.wrapT = .repeat }
-            if let d = try? await URLSession.shared.data(from: base.appendingPathComponent("tex_\(name)_em.png")).0, let img = UIImage(data: d) { m.emission.contents = img; m.emission.wrapS = .repeat; m.emission.wrapT = .repeat; m.emission.intensity = 0 }
+            if let d = await RealismTileCache.data(for: base.appendingPathComponent("tex_\(name).png")), let img = UIImage(data: d) { m.diffuse.contents = img; m.diffuse.wrapS = .repeat; m.diffuse.wrapT = .repeat }
+            if let d = await RealismTileCache.data(for: base.appendingPathComponent("tex_\(name)_em.png")), let img = UIImage(data: d) { m.emission.contents = img; m.emission.wrapS = .repeat; m.emission.wrapT = .repeat; m.emission.intensity = 0 }
+            sharpen(m.diffuse); sharpen(m.emission)
             switch name {
             case "glass": m.metalness.contents = 0.85; m.roughness.contents = 0.12
             case "metal": m.metalness.contents = 0.6; m.roughness.contents = 0.5
@@ -196,10 +352,21 @@ enum ObjLoader {
             default: m.metalness.contents = 0.0; m.roughness.contents = 0.9
             }
         case .trees:
-            m.diffuse.contents = name == "trunk" ? UIColor(red: 0.37, green: 0.25, blue: 0.15, alpha: 1) : UIColor(red: 0.22, green: 0.49, blue: 0.22, alpha: 1)
+            m.diffuse.contents = name == "trunk" ? ObjLoader.foliageSeason.trunkColor : ObjLoader.foliageSeason.leafColor
             m.roughness.contents = 1.0; m.metalness.contents = 0.0
         }
         cache[key] = m; return m
+    }
+
+    /// Ground/building photo textures otherwise look blurry once the camera gets close or views
+    /// them at a grazing angle — SceneKit's default texture sampling has no mipmapping/anisotropy
+    /// unless explicitly requested. Linear filtering across all three stages + high anisotropy
+    /// keeps detail sharp at any distance or angle without any extra network/tile-baking cost.
+    private static func sharpen(_ prop: SCNMaterialProperty) {
+        prop.magnificationFilter = .linear
+        prop.minificationFilter = .linear
+        prop.mipFilter = .linear
+        prop.maxAnisotropy = 16
     }
 
     static func node(from groups: [Group], style: ObjStyle, base: URL, tile: String, ground: GroundGrid?, cache: inout [String: SCNMaterial]) async -> SCNNode {
@@ -243,10 +410,10 @@ enum ObjLoader {
     }
     private static func neighbours(_ i: Int, _ j: Int) -> [(Int, Int)] { [(i, j), (i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1), (i - 1, j - 1), (i + 1, j - 1), (i - 1, j + 1), (i + 1, j + 1)] }
 
-    private static func loadTiles(base: URL, names: [String], style: ObjStyle, ground: GroundGrid?) async -> SCNNode {
+    static func loadTiles(base: URL, names: [String], style: ObjStyle, ground: GroundGrid?) async -> SCNNode {
         let parent = SCNNode(); var cache: [String: SCNMaterial] = [:]
         for name in names {
-            guard let d = try? await URLSession.shared.data(from: base.appendingPathComponent("\(name).obj")).0, let text = String(data: d, encoding: .utf8) else { continue }
+            guard let d = await RealismTileCache.data(for: base.appendingPathComponent("\(name).obj")), let text = String(data: d, encoding: .utf8) else { continue }
             let groups = parse(text)
             if groups.isEmpty { continue }
             let n = await node(from: groups, style: style, base: base, tile: name, ground: ground, cache: &cache)
@@ -276,33 +443,47 @@ enum RealismStage {
         sc.fogStartDistance = 600; sc.fogEndDistance = 6000; sc.fogDensityExponent = 1.4
     }
 
-    static func apply(_ preset: String, to sc: SCNScene, lat: Double, lon: Double) {
+    static func apply(_ preset: String, to sc: SCNScene, lat: Double, lon: Double, date: Date = Date()) {
         let sun = sc.rootNode.childNode(withName: "sun", recursively: false), amb = sc.rootNode.childNode(withName: "amb", recursively: false)
         let cam = sc.rootNode.childNode(withName: "cam", recursively: false)?.camera
         var elev: Float = 0.9, turb: Float = 0.25, sunI: CGFloat = 1500, ambI: CGFloat = 250, emis: CGFloat = 0, fog = UIColor(red: 0.75, green: 0.82, blue: 0.92, alpha: 1)
+        var azDeg: Float = 200   // south-ish default; overridden below for "auto"
+        var isNight = false
         switch preset {
-        case "golden": elev = 0.12; turb = 0.55; sunI = 1900; ambI = 200; emis = 0.4; fog = UIColor(red: 0.95, green: 0.75, blue: 0.55, alpha: 1)
-        case "night": elev = -0.3; turb = 0.1; sunI = 60; ambI = 40; emis = 1.0; fog = UIColor(red: 0.02, green: 0.03, blue: 0.06, alpha: 1)
-        case "overcast": elev = 0.5; turb = 0.95; sunI = 600; ambI = 420; emis = 0.15; fog = UIColor(white: 0.75, alpha: 1)
+        case "golden": elev = 0.12; turb = 0.55; sunI = 1900; ambI = 200; emis = 0.4; fog = UIColor(red: 0.95, green: 0.75, blue: 0.55, alpha: 1); azDeg = 281
+        case "night": elev = -0.3; turb = 0.1; sunI = 60; ambI = 40; emis = 1.0; fog = UIColor(red: 0.02, green: 0.03, blue: 0.06, alpha: 1); isNight = true; azDeg = 206
+        case "overcast": elev = 0.5; turb = 0.95; sunI = 600; ambI = 420; emis = 0.15; fog = UIColor(white: 0.75, alpha: 1); azDeg = 206
+        case "auto":
+            // real sun position for this place and moment — see Solar (Weather.swift) + Geo.bearing (Extras.swift)
+            let coord = CLLocationCoordinate2D(latitude: lat, longitude: lon)
+            let elevDeg = Solar.sunElevation(at: coord, date: date)
+            azDeg = Float(Geo.bearing(from: coord, to: Solar.subsolar(date)))
+            elev = Float(sin(elevDeg * .pi / 180))
+            switch elevDeg {
+            case 20...: turb = 0.25; sunI = 1500; ambI = 250; emis = 0; fog = UIColor(red: 0.75, green: 0.82, blue: 0.92, alpha: 1)
+            case 0..<20: let t = CGFloat(elevDeg / 20); turb = 0.55; sunI = 1500 + 400 * Double(t); ambI = 200; emis = 0.5 - 0.5 * t; fog = UIColor(red: 0.95, green: 0.75, blue: 0.55, alpha: 1)
+            case -6..<0: turb = 0.7; sunI = 400; ambI = 150; emis = 0.75; fog = UIColor(red: 0.35, green: 0.28, blue: 0.32, alpha: 1)
+            default: turb = 0.1; sunI = 60; ambI = 40; emis = 1.0; fog = UIColor(red: 0.02, green: 0.03, blue: 0.06, alpha: 1); isNight = true
+            }
         default: break
         }
         // physically-based sky drives both the backdrop and image-based lighting (reflections in glass)
         let sky = MDLSkyCubeTexture(name: "sky", channelEncoding: .float16, textureDimensions: vector_int2(512, 512), turbidity: turb, sunElevation: max(elev, 0.02), upperAtmosphereScattering: 0.35, groundAlbedo: 0.3)
         sky.groundColor = CGColor(red: 0.2, green: 0.25, blue: 0.18, alpha: 1)
         sky.update()
-        sc.background.contents = preset == "night" ? UIColor(red: 0.01, green: 0.015, blue: 0.03, alpha: 1) : sky
-        sc.lightingEnvironment.contents = sky; sc.lightingEnvironment.intensity = preset == "night" ? 0.08 : preset == "overcast" ? 1.0 : 1.4
+        sc.background.contents = isNight ? UIColor(red: 0.01, green: 0.015, blue: 0.03, alpha: 1) : sky
+        sc.lightingEnvironment.contents = sky; sc.lightingEnvironment.intensity = isNight ? 0.08 : preset == "overcast" ? 1.0 : 1.4
         sc.fogColor = fog
-        // sun direction: azimuth from a rough local-solar-time model, elevation from the preset
-        let az: Float = preset == "golden" ? 4.9 : 3.6   // west-ish for golden, S/SW for day (radians, from north clockwise)
+        // sun direction: real azimuth for "auto", a fixed look for the manual presets
+        let az = azDeg * .pi / 180
         let e = max(elev, 0.05)
         let dir = SCNVector3(sin(az) * cos(e), -sin(e), -cos(az) * cos(e))
         sun?.look(at: SCNVector3(dir.x, dir.y, dir.z), up: SCNVector3(0, 1, 0), localFront: SCNVector3(0, 0, -1))
-        sun?.light?.intensity = sunI; sun?.light?.temperature = preset == "golden" ? 3200 : preset == "night" ? 8000 : 6000
+        sun?.light?.intensity = sunI; sun?.light?.temperature = preset == "golden" ? 3200 : isNight ? 8000 : 6000
         amb?.light?.intensity = ambI
-        cam?.exposureOffset = preset == "night" ? 0.6 : 0
-        cam?.bloomIntensity = preset == "night" ? 0.9 : 0.35
-        // window lights
+        cam?.exposureOffset = isNight ? 0.6 : 0
+        cam?.bloomIntensity = isNight ? 0.9 : 0.35
+        // window lights — lit whenever it's actually dark out
         sc.rootNode.enumerateChildNodes { n, _ in
             for m in n.geometry?.materials ?? [] where m.emission.contents is UIImage { m.emission.intensity = emis * 1.6 }
         }
@@ -311,6 +492,11 @@ enum RealismStage {
 
 struct RealismSCNView: UIViewRepresentable {
     let scene: SCNScene
+    var onFocusMoved: ((SCNVector3) -> Void)? = nil
+    var onViewReady: ((SCNView) -> Void)? = nil
+
+    func makeCoordinator() -> Coordinator { Coordinator(onFocusMoved: onFocusMoved) }
+
     func makeUIView(context: Context) -> SCNView {
         let v = SCNView()
         v.scene = scene
@@ -323,7 +509,46 @@ struct RealismSCNView: UIViewRepresentable {
         v.antialiasingMode = .multisampling4X
         v.preferredFramesPerSecond = 60
         v.backgroundColor = .black
+        v.contentScaleFactor = UIScreen.main.scale   // full Retina resolution — no soft/blurry downsample
+        v.delegate = context.coordinator
+        context.coordinator.view = v
+        let ready = onViewReady
+        DispatchQueue.main.async { ready?(v) }
         return v
     }
-    func updateUIView(_ v: SCNView, context: Context) {}
+    func updateUIView(_ v: SCNView, context: Context) { context.coordinator.onFocusMoved = onFocusMoved }
+
+    /// Polls the camera controller's pan/orbit target a few times a second while the view is
+    /// open — this is how we know the user has panned somewhere new and it's time to stream
+    /// in the next ring of tiles (moving the target is SceneKit's own two-finger-pan gesture,
+    /// already enabled by `allowsCameraControl` above; no extra gesture code needed).
+    final class Coordinator: NSObject, SCNSceneRendererDelegate {
+        var onFocusMoved: ((SCNVector3) -> Void)?
+        weak var view: SCNView?
+        private var lastCheck: TimeInterval = 0
+        private var lastTarget: SCNVector3?
+
+        init(onFocusMoved: ((SCNVector3) -> Void)?) { self.onFocusMoved = onFocusMoved }
+
+        func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
+            guard time - lastCheck > 0.35, let v = view else { return }
+            lastCheck = time
+            let t = v.defaultCameraController.target
+            if let last = lastTarget {
+                let d = sqrt(pow(t.x - last.x, 2) + pow(t.z - last.z, 2))
+                if d < 2 { return }
+            }
+            lastTarget = t
+            let cb = onFocusMoved
+            DispatchQueue.main.async { cb?(t) }
+        }
+    }
+}
+
+// MARK: - Share sheet (photo mode export)
+
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController { UIActivityViewController(activityItems: items, applicationActivities: nil) }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
