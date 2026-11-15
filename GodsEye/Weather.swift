@@ -194,30 +194,6 @@ final class RadarEngine: ObservableObject {
     }
 }
 
-// MARK: - Radar image pinned to the map with MapProxy (top-down only)
-
-struct RadarOverlayView: View {
-    let composite: RadarComposite
-    let proxy: MapProxy
-    let opacity: Double
-    let heading: Double
-    let pitch: Double
-
-    var body: some View {
-        if pitch < 12,
-           let p1 = proxy.convert(composite.nw, to: .local),
-           let p2 = proxy.convert(composite.se, to: .local) {
-            let rect = CGRect(x: min(p1.x, p2.x), y: min(p1.y, p2.y), width: abs(p2.x - p1.x), height: abs(p2.y - p1.y))
-            Image(uiImage: composite.image)
-                .resizable()
-                .frame(width: rect.width, height: rect.height)
-                .position(x: rect.midX, y: rect.midY)
-                .opacity(opacity)
-                .allowsHitTesting(false)
-        }
-    }
-}
-
 // MARK: - Solar geometry: subsolar point, night terminator, sunlit test
 
 enum Solar {

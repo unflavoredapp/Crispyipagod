@@ -113,19 +113,18 @@ struct Scene3DView: View {
         .sheet(item: $selected) { e in
             DetailSheet(entity: e)
                 .presentationDetents([.fraction(0.48), .large])
-                .presentationBackgroundInteraction(.enabled(upThrough: .fraction(0.48)))
                 .presentationDragIndicator(.visible)
-                .presentationBackground(.ultraThinMaterial)
+                .presentationMaterialChrome(upThrough: 0.48)
         }
-        .onChange(of: s.sceneTerrain) { _, v in bridge.eval("GE.setTerrain(\(v))") }
-        .onChange(of: s.sceneBuildings) { _, v in bridge.eval("GE.setBuildings(\(v))") }
-        .onChange(of: s.sensor) { _, v in bridge.eval("GE.setSensor('\(v.rawValue)')") }
-        .onChange(of: s.hud) { _, v in bridge.eval("GE.setHUD(\(v))") }
-        .onChange(of: s.sceneEntities) { _, _ in pushEntities() }
-        .onChange(of: s.sceneLines) { _, _ in pushEntities() }
-        .onChange(of: s.propertyLines) { _, _ in pushEntities() }
-        .onChange(of: s.trackedID) { _, _ in pushEntities() }
-        .onChange(of: selected) { _, _ in pushEntities() }
+        .onChangeCompat(of: s.sceneTerrain) { v in bridge.eval("GE.setTerrain(\(v))") }
+        .onChangeCompat(of: s.sceneBuildings) { v in bridge.eval("GE.setBuildings(\(v))") }
+        .onChangeCompat(of: s.sensor) { v in bridge.eval("GE.setSensor('\(v.rawValue)')") }
+        .onChangeCompat(of: s.hud) { v in bridge.eval("GE.setHUD(\(v))") }
+        .onChangeCompat(of: s.sceneEntities) { _ in pushEntities() }
+        .onChangeCompat(of: s.sceneLines) { _ in pushEntities() }
+        .onChangeCompat(of: s.propertyLines) { _ in pushEntities() }
+        .onChangeCompat(of: s.trackedID) { _ in pushEntities() }
+        .onChangeCompat(of: selected) { _ in pushEntities() }
         .onDisappear { pushTimer?.invalidate(); pushTimer = nil; trackTimer?.invalidate(); trackTimer = nil }
     }
 
