@@ -10,7 +10,7 @@ Native SwiftUI port of the God's Eye View concept: live globe, keyless public fe
    `https://github.com/<you>/<repo>/releases/download/latest/GodsEye.ipa`
 4. Sign + install with your signer.
 
-Target: iOS 17+. Bundle id `party.mrvek.godseye`.
+Target: iOS 16+. Bundle id `party.mrvek.godseye`. Live Activities require iOS 16.1+.
 
 ## Screens
 

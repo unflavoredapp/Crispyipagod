@@ -28,12 +28,12 @@ final class AppState: ObservableObject {
     static let home = CLLocationCoordinate2D(latitude: 20, longitude: -20)
     static let globeDistance: Double = 26_000_000
 
-    // Camera
-    @Published var camera: MapCameraPosition = .camera(MapCamera(centerCoordinate: AppState.home, distance: AppState.globeDistance, heading: 0, pitch: 0))
+    // Camera (MKMapCamera-compatible pose; `cameraEpoch` bumps on programmatic flies)
     @Published var center: CLLocationCoordinate2D = AppState.home
     @Published var distance: Double = AppState.globeDistance
     @Published var heading: Double = 0
     @Published var pitch: Double = 0
+    @Published var cameraEpoch: UInt64 = 0
     @Published var centerName: String = "GLOBAL VIEW"
 
     // Data
@@ -360,17 +360,19 @@ final class AppState: ObservableObject {
         }
     }
 
-    var mapStyle: MapStyle {
-        let elev: MapStyle.Elevation = performanceMode ? .flat : .realistic
+    var mkMapType: MKMapType {
         let traffic = layers.contains(.traffic)
         switch mapStyleRaw {
-        case "hybrid": return .hybrid(elevation: elev, pointsOfInterest: .excludingAll, showsTraffic: traffic)
-        case "standard": return .standard(elevation: elev, emphasis: .muted, pointsOfInterest: .excludingAll, showsTraffic: traffic)
-        default:
-            if traffic { return .hybrid(elevation: elev, pointsOfInterest: .excludingAll, showsTraffic: true) }
-            return .imagery(elevation: elev)
+        case "hybrid": return .hybrid
+        case "standard": return .standard
+        default: return traffic ? .hybrid : .satellite
         }
     }
+
+    var showsTraffic: Bool { layers.contains(.traffic) }
+
+    /// True while a programmatic fly/orbit should drive the map camera.
+    var isProgrammaticCamera: Bool { Date() < programmaticMoveUntil }
 
     var pollInterval: UInt64 { performanceMode ? 30 : 15 }
     var isLive: Bool { timeCursor == nil }
@@ -883,12 +885,12 @@ final class AppState: ObservableObject {
 
     // MARK: Camera
 
-    func cameraChanged(_ ctx: MapCameraUpdateContext) {
+    func cameraChanged(center newCenter: CLLocationCoordinate2D, distance newDistance: Double, heading newHeading: Double, pitch newPitch: Double) {
         let prevCap = contactCap
-        center = ctx.camera.centerCoordinate
-        distance = ctx.camera.distance
-        heading = ctx.camera.heading
-        pitch = ctx.camera.pitch
+        center = newCenter
+        distance = newDistance
+        heading = newHeading
+        pitch = newPitch
         let userMoved = Date() > programmaticMoveUntil
         if userMoved && directing { stopDirector() }
         if userMoved, isTracking, let tc = trackedCoord, center.distance(to: tc) > max(distance * 0.6, 20_000) {
@@ -957,9 +959,20 @@ final class AppState: ObservableObject {
 
     func fly(to c: CLLocationCoordinate2D, distance d: Double, pitch: Double = 0, heading: Double = 0, duration: Double = 1.2) {
         programmaticMoveUntil = Date().addingTimeInterval(duration + 0.6)
-        withAnimation(.easeInOut(duration: duration)) {
-            camera = .camera(MapCamera(centerCoordinate: c, distance: d, heading: heading, pitch: pitch))
-        }
+        center = c
+        distance = d
+        self.heading = heading
+        self.pitch = pitch
+        cameraEpoch &+= 1
+    }
+
+    func setCameraPose(center c: CLLocationCoordinate2D, distance d: Double, heading h: Double, pitch p: Double, hold: TimeInterval = 1.0) {
+        programmaticMoveUntil = Date().addingTimeInterval(hold)
+        center = c
+        distance = d
+        heading = h
+        pitch = p
+        cameraEpoch &+= 1
     }
 
     func resetGlobe() {
@@ -1242,10 +1255,7 @@ final class AppState: ObservableObject {
                 h = (h + 4).truncatingRemainder(dividingBy: 360)
                 let c = self.trackedCoord ?? self.selected?.coord ?? self.center
                 let d = max(self.distance, 800)
-                self.programmaticMoveUntil = Date().addingTimeInterval(1.2)
-                withAnimation(.linear(duration: 0.5)) {
-                    self.camera = .camera(MapCamera(centerCoordinate: c, distance: d, heading: h, pitch: max(self.pitch, 55)))
-                }
+                self.setCameraPose(center: c, distance: d, heading: h, pitch: max(self.pitch, 55), hold: 1.2)
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
@@ -1345,10 +1355,7 @@ final class AppState: ObservableObject {
                 guard let self, self.replayPlaying else { return }
                 self.replayT = min(LaunchReplay.duration, self.replayT + 0.25 * 10 * self.replayRate)
                 let st = r.state(at: self.replayT)
-                self.programmaticMoveUntil = Date().addingTimeInterval(1)
-                withAnimation(.linear(duration: 0.25)) {
-                    self.camera = .camera(MapCamera(centerCoordinate: st.coord, distance: 40_000 + st.altKm * 12_000, heading: r.azimuth - 40, pitch: 62))
-                }
+                self.setCameraPose(center: st.coord, distance: 40_000 + st.altKm * 12_000, heading: r.azimuth - 40, pitch: 62, hold: 1)
                 if self.replayT >= LaunchReplay.duration { self.replayPlaying = false; return }
             }
         }

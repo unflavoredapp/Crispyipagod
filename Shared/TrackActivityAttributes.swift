@@ -1,6 +1,7 @@
 import ActivityKit
 import Foundation
 
+@available(iOS 16.1, *)
 struct TrackActivityAttributes: ActivityAttributes {
     public struct ContentState: Codable, Hashable {
         var lat: Double

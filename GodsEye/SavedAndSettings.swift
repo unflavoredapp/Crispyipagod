@@ -175,7 +175,7 @@ struct SettingsView: View {
 
                 Section {
                     Toggle("Performance mode", isOn: $s.performanceMode)
-                        .onChange(of: s.performanceMode) { _, _ in s.startPolling() }
+                        .onChangeCompat(of: s.performanceMode) { _ in s.startPolling() }
                 } header: { Text("Performance") } footer: {
                     Text(s.performanceMode
                          ? "Flat terrain with adaptive density caps · 30s polling · 5s satellite ticks. Recommended on older devices."

@@ -2,14 +2,14 @@ name: GodsEye
 options:
   bundleIdPrefix: party.mrvek
   deploymentTarget:
-    iOS: "17.0"
+    iOS: "16.0"
   xcodeVersion: "16.0"
   createIntermediateGroups: true
 settings:
   base:
     MARKETING_VERSION: "1.4.0"
     CURRENT_PROJECT_VERSION: "6"
-    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
     SWIFT_VERSION: "5.9"
     CODE_SIGN_STYLE: Manual
     CODE_SIGNING_ALLOWED: "NO"
@@ -56,3 +56,4 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SKIP_INSTALL: "YES"
         ASSETCATALOG_COMPILER_GENERATE_ASSET_SYMBOLS: "NO"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.1"

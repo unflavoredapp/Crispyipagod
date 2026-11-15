@@ -192,7 +192,7 @@ struct CameraLiveView: View {
         .preferredColorScheme(.dark)
         .onAppear { load(camera) ; frames = rec.frames(for: camera.id) }
         .onDisappear { teardown() }
-        .onChange(of: rec.frameCounts[camera.id] ?? 0) { _, _ in frames = rec.frames(for: camera.id) }
+        .onChangeCompat(of: rec.frameCounts[camera.id] ?? 0) { _ in frames = rec.frames(for: camera.id) }
         .fullScreenCover(item: $reviewing) { ref in FrameReview(url: ref.url, date: rec.date(of: ref.url), all: frames, rec: rec, camID: camera.id) }
     }
 

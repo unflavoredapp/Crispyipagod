@@ -70,11 +70,29 @@ final class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
-// MARK: - Live Activity
+// MARK: - Live Activity (ActivityKit requires iOS 16.1+)
 
 @MainActor
 final class LiveActivityManager {
     static let shared = LiveActivityManager()
+
+    func start(_ e: Entity) {
+        if #available(iOS 16.1, *) { LiveActivityBackend.shared.start(e) }
+    }
+
+    func update(_ e: Entity, coord: CLLocationCoordinate2D) {
+        if #available(iOS 16.1, *) { LiveActivityBackend.shared.update(e, coord: coord) }
+    }
+
+    func end() {
+        if #available(iOS 16.1, *) { LiveActivityBackend.shared.end() }
+    }
+}
+
+@available(iOS 16.1, *)
+@MainActor
+private final class LiveActivityBackend {
+    static let shared = LiveActivityBackend()
     private var activity: Activity<TrackActivityAttributes>?
 
     func start(_ e: Entity) {
@@ -82,19 +100,35 @@ final class LiveActivityManager {
         end()
         let attrs = TrackActivityAttributes(title: e.title, kind: e.kind.label)
         let state = TrackActivityAttributes.ContentState(lat: e.lat, lon: e.lon, summary: e.summary, updated: Date())
-        activity = try? Activity.request(attributes: attrs, content: .init(state: state, staleDate: nil), pushType: nil)
+        if #available(iOS 16.2, *) {
+            activity = try? Activity.request(attributes: attrs, content: .init(state: state, staleDate: nil), pushType: nil)
+        } else {
+            activity = try? Activity.request(attributes: attrs, contentState: state, pushType: nil)
+        }
     }
 
     func update(_ e: Entity, coord: CLLocationCoordinate2D) {
         guard let a = activity else { return }
         let state = TrackActivityAttributes.ContentState(lat: coord.latitude, lon: coord.longitude, summary: e.summary, updated: Date())
-        Task { await a.update(.init(state: state, staleDate: nil)) }
+        Task {
+            if #available(iOS 16.2, *) {
+                await a.update(.init(state: state, staleDate: nil))
+            } else {
+                await a.update(using: state)
+            }
+        }
     }
 
     func end() {
         guard let a = activity else { return }
         activity = nil
-        Task { await a.end(nil, dismissalPolicy: .immediate) }
+        Task {
+            if #available(iOS 16.2, *) {
+                await a.end(nil, dismissalPolicy: .immediate)
+            } else {
+                await a.end(using: nil, dismissalPolicy: .immediate)
+            }
+        }
     }
 }
 
