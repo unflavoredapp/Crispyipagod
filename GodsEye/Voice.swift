@@ -20,11 +20,21 @@ final class VoiceController: ObservableObject {
 
     func toggle() { listening ? stop(commit: true) : start() }
 
+    /// Mic permission that works on iOS 16 (`AVAudioApplication` is iOS 17+).
+    private static func requestMicPermission() async -> Bool {
+        if #available(iOS 17.0, *) {
+            return await AVAudioApplication.requestRecordPermission()
+        }
+        return await withCheckedContinuation { cont in
+            AVAudioSession.sharedInstance().requestRecordPermission { cont.resume(returning: $0) }
+        }
+    }
+
     func start() {
         SFSpeechRecognizer.requestAuthorization { [weak self] auth in
             Task { @MainActor in
                 guard auth == .authorized else { self?.lastCommand = "Speech permission denied"; return }
-                let ok = await AVAudioApplication.requestRecordPermission()
+                let ok = await Self.requestMicPermission()
                 guard ok else { self?.lastCommand = "Microphone permission denied"; return }
                 self?.begin()
             }
